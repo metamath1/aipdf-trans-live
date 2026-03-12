@@ -270,6 +270,64 @@ class PDFViewer(ttk.Frame):
                 break
         return page_num, page_y0
 
+    def _build_continuous_region(
+        self, rx0: int, ry0: int, rx1: int, ry1: int
+    ) -> tuple[Image.Image, int, bool]:
+        """연속 스크롤 모드에서 드래그 영역을 합성 PIL 이미지로 반환한다.
+
+        선택 영역이 여러 페이지에 걸칠 때 각 페이지의 해당 부분을 세로로 이어붙인다.
+
+        Returns:
+            (composite, primary_page_num, is_multi_page)
+            - composite:         선택 영역 전체를 담은 PIL 이미지
+            - primary_page_num:  드래그가 시작된 페이지 번호
+            - is_multi_page:     2개 이상의 페이지에 걸쳐 있는지 여부
+        """
+        crops: list[Image.Image] = []
+        primary_page = None
+
+        for i, (page_img, y_offset) in enumerate(
+            zip(self._pil_pages, self._page_y_offsets)
+        ):
+            page_top = y_offset
+            page_bot = y_offset + page_img.height
+
+            # 선택 영역과 이 페이지가 겹치지 않으면 건너뜀
+            if ry1 <= page_top or ry0 >= page_bot:
+                continue
+
+            if primary_page is None:
+                primary_page = i
+
+            crop_y0 = max(0, ry0 - page_top)
+            crop_y1 = min(page_img.height, ry1 - page_top)
+            w = page_img.width
+            crops.append(page_img.crop((max(0, rx0), crop_y0, min(w, rx1), crop_y1)))
+
+        if not crops:
+            # 폴백: 현재 페이지 그대로
+            page_num, page_y0 = self._get_page_at_y(ry0)
+            pil = self._pil_pages[page_num] if page_num < len(self._pil_pages) else self._pil_img
+            if pil is None:
+                return Image.new("RGB", (1, 1)), self.current_page, False
+            w, h = pil.size
+            adj_y0 = max(0, ry0 - page_y0)
+            adj_y1 = min(h, ry1 - page_y0)
+            return pil.crop((max(0, rx0), adj_y0, min(w, rx1), adj_y1)), page_num, False
+
+        if len(crops) == 1:
+            return crops[0], primary_page, False
+
+        # 여러 페이지 crop을 흰 배경 위에 세로로 합성
+        total_h = sum(c.height for c in crops)
+        max_w = max(c.width for c in crops)
+        composite = Image.new("RGB", (max_w, total_h), color=(255, 255, 255))
+        y = 0
+        for crop in crops:
+            composite.paste(crop, (0, y))
+            y += crop.height
+        return composite, primary_page, True
+
     def _prev_page(self):
         if self._continuous_scroll:
             if self.current_page > 0:
@@ -398,41 +456,54 @@ class PDFViewer(ttk.Frame):
         ).start()
 
     def _do_translate(self, rx0: int, ry0: int, rx1: int, ry1: int):
-        # 연속 스크롤 모드: 캔버스 y 좌표 → 해당 페이지 기준 상대 좌표로 변환
+        # 연속 스크롤 모드: 페이지 경계를 넘는 드래그를 합성 이미지로 처리
         if self._continuous_scroll and self._page_y_offsets:
-            page_num, page_y0 = self._get_page_at_y(ry0)
-            pil_img = self._pil_pages[page_num] if page_num < len(self._pil_pages) else None
-            adj_ry0 = ry0 - page_y0
-            adj_ry1 = ry1 - page_y0
+            cropped, page_num, is_multi = self._build_continuous_region(rx0, ry0, rx1, ry1)
+            # pdf_rect는 시작 페이지 기준 단일 페이지 범위로 계산
+            _, page_y0 = self._get_page_at_y(ry0)
+            page_img = self._pil_pages[page_num] if page_num < len(self._pil_pages) else None
+            adj_ry0 = max(0, ry0 - page_y0)
+            # 단일 페이지면 ry1도 보정, 멀티 페이지면 해당 페이지 끝까지만
+            if page_img is not None:
+                adj_ry1 = min(page_img.height, ry1 - page_y0)
+            else:
+                adj_ry1 = adj_ry0 + cropped.height
         else:
             page_num = self.current_page
             pil_img = self._pil_img
+            is_multi = False
+            if pil_img is None:
+                self._translation_result = (None, "[오류] 렌더된 페이지가 없습니다")
+                self.event_generate("<<TranslationReady>>")
+                return
+            w, h = pil_img.size
+            cropped = pil_img.crop((
+                max(0, rx0), max(0, ry0),
+                min(w, rx1), min(h, ry1),
+            ))
             adj_ry0, adj_ry1 = ry0, ry1
 
-        if pil_img is None:
+        if cropped is None or cropped.width < 1 or cropped.height < 1:
             self._translation_result = (None, "[오류] 렌더된 페이지가 없습니다")
             self.event_generate("<<TranslationReady>>")
             return
-
-        w, h = pil_img.size
-        cropped = pil_img.crop((
-            max(0, rx0), max(0, adj_ry0),
-            min(w, rx1), min(h, adj_ry1),
-        ))
 
         if self._translation_mode == "markdown":
             from src.table_handler import detect_tables, render_table_image, crop_table_pct
             from src.translator import analyze_and_translate
 
-            # high_res를 먼저 렌더한다.
-            # AI 분석(좌표 추정)과 크롭이 동일한 이미지 기준이 되어야
-            # % 좌표가 정확히 일치한다.
             pdf_rect = fitz.Rect(
                 rx0 / self.zoom, adj_ry0 / self.zoom,
                 rx1 / self.zoom, adj_ry1 / self.zoom,
             )
             page = self.doc[page_num]
-            high_res = render_table_image(page, pdf_rect, dpi=150)
+
+            if is_multi:
+                # 멀티 페이지: 합성 이미지를 직접 AI에 전달 (고해상도 재렌더 불필요)
+                high_res = cropped
+            else:
+                # 단일 페이지: 기존과 동일하게 150 DPI 재렌더
+                high_res = render_table_image(page, pdf_rect, dpi=150)
 
             # AI에 high_res 전달: 고해상도 이미지로 좌표 추정 정확도 향상
             layout_info = analyze_and_translate(high_res)
@@ -449,8 +520,8 @@ class PDFViewer(ttk.Frame):
             has_figures = bool(fig_markers and layout_info.get("has_figures", False))
 
             if has_tables:
-                # [1순위] PyMuPDF 정밀 크롭
-                table_rects = detect_tables(page, pdf_rect)
+                # [1순위] PyMuPDF 정밀 크롭 (단일 페이지에서만 의미있음)
+                table_rects = [] if is_multi else detect_tables(page, pdf_rect)
                 if table_rects and len(table_rects) >= len(tbl_markers):
                     table_images = [
                         render_table_image(page, r)
