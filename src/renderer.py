@@ -116,6 +116,21 @@ def _scan_inline_dollar_math(text: str, store: dict, counter: list) -> str:
             continue
 
         # '$' 발견
+        # Guard 0: ASCII 알파뉴메릭 또는 LaTeX 닫는 기호({, ), ]) 뒤 '$' 는
+        #          닫는 구분자 → 새 여는 구분자로 처리하지 않음.
+        #          예: "$1 < t \leq T$에 대한" 에서 T 뒤의 $가 여는 기호로
+        #          잘못 처리되어 이후 수식이 깨지는 문제 방지.
+        #          (Korean/Unicode 문자는 isalnum()이 True여도 여기서는 제외)
+        if i > 0 and (
+            'a' <= text[i - 1] <= 'z'
+            or 'A' <= text[i - 1] <= 'Z'
+            or '0' <= text[i - 1] <= '9'
+            or text[i - 1] in '})]'
+        ):
+            out.append(ch)
+            i += 1
+            continue
+
         # Guard 1: '$$' 는 건너뜀 (display math placeholder 뒤 남은 $ 포함)
         if i + 1 < n and text[i + 1] == '$':
             out.append(ch)
