@@ -13,6 +13,8 @@ from src.translator import (
     translate_to_markdown,
 )
 
+_PAGE_GAP = 8  # 연속 스크롤 모드: 페이지 사이 여백(px)
+
 
 def _detect_figure_layout(fig_meta: list) -> str:
     """그림 메타데이터(% 좌표)로 레이아웃을 추정한다.
@@ -27,7 +29,7 @@ def _detect_figure_layout(fig_meta: list) -> str:
     f0, f1 = fig_meta[0], fig_meta[1]
     # y 시작점이 15% 이내로 가깝고, f0이 f1보다 확실히 왼쪽에 있으면 2col
     y_close = abs(f0.get("y_pct", 0) - f1.get("y_pct", 0)) < 15
-    x0_end  = f0.get("x_pct", 0) + f0.get("w_pct", 50)
+    x0_end   = f0.get("x_pct", 0) + f0.get("w_pct", 50)
     x1_start = f1.get("x_pct", 50)
     x_separated = x0_end < x1_start + 5  # f0이 f1의 왼쪽
     if y_close and x_separated:
@@ -47,11 +49,17 @@ class PDFViewer(ttk.Frame):
         self.current_page = 0
         self.zoom = self.ZOOM
 
-        self._pil_img: Image.Image | None = None  # raw PIL image of current page
+        self._pil_img: Image.Image | None = None  # 단일 페이지 모드 PIL 이미지
         self._drag_start = None
         self._drag_rect = None
         self._translation_result: tuple = (None, "")
         self._translation_mode = "markdown"
+
+        # 연속 스크롤 모드 상태
+        self._continuous_scroll: bool = False
+        self._pil_pages: list[Image.Image] = []     # 전체 페이지 PIL 이미지 목록
+        self._photo_refs: list = []                  # PhotoImage 참조 유지
+        self._page_y_offsets: list[int] = []         # 각 페이지 캔버스 y 시작 좌표
 
         self._build_ui()
         # Defer first render so the canvas has a real width to fit into
@@ -89,6 +97,17 @@ class PDFViewer(ttk.Frame):
             toolbar, text="축소 −", command=self._zoom_out,
             bootstyle="outline-light",
         ).pack(side=LEFT, padx=2)
+
+        ttk.Separator(toolbar, orient=VERTICAL).pack(side=LEFT, fill=Y, padx=4, pady=3)
+
+        self._continuous_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            toolbar,
+            text="연속 스크롤",
+            variable=self._continuous_var,
+            command=self._on_continuous_toggle,
+            bootstyle="toolbutton-secondary",
+        ).pack(side=LEFT, padx=(2, 4))
 
         # canvas + scrollbars
         frame = ttk.Frame(self)
@@ -153,12 +172,17 @@ class PDFViewer(ttk.Frame):
         self._resize_job = self.after(150, self._fit_to_width)
 
     def _render_page(self):
+        """현재 모드에 따라 단일 페이지 또는 전체 페이지를 렌더한다."""
+        if self._continuous_scroll:
+            self._render_all_pages()
+            return
+
         page = self.doc[self.current_page]
         mat = fitz.Matrix(self.zoom, self.zoom)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
-        self._pil_img = img  # store raw PIL image for cropping (canvas px == image px)
+        self._pil_img = img  # store raw PIL image for cropping
         self._photo = ImageTk.PhotoImage(img)
 
         self.canvas.delete("all")
@@ -169,12 +193,97 @@ class PDFViewer(ttk.Frame):
             text=f"페이지 {self.current_page + 1} / {len(self.doc)}"
         )
 
+    def _render_all_pages(self):
+        """연속 스크롤 모드: 모든 페이지를 세로로 이어 붙여 캔버스에 렌더한다."""
+        self.canvas.delete("all")
+        self._pil_pages = []
+        self._photo_refs = []
+        self._page_y_offsets = []
+
+        y = 0
+        max_w = 1
+        for i in range(len(self.doc)):
+            page = self.doc[i]
+            mat = fitz.Matrix(self.zoom, self.zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+            self._pil_pages.append(img)
+            self._page_y_offsets.append(y)
+
+            photo = ImageTk.PhotoImage(img)
+            self._photo_refs.append(photo)
+            self.canvas.create_image(0, y, anchor=NW, image=photo)
+
+            max_w = max(max_w, pix.width)
+            y += pix.height + _PAGE_GAP
+
+        self.canvas.configure(scrollregion=(0, 0, max_w, y))
+        self._update_page_label_continuous()
+
+    def _on_continuous_toggle(self):
+        """연속 스크롤 토글 처리."""
+        self._continuous_scroll = self._continuous_var.get()
+        if self._continuous_scroll:
+            self._render_all_pages()
+            # 현재 페이지 위치로 스크롤
+            self.after(50, lambda: self._scroll_to_page(self.current_page, update_label=False))
+        else:
+            self._render_page()
+
+    def _scroll_to_page(self, page_num: int, update_label: bool = True):
+        """연속 모드에서 지정한 페이지 위치로 스크롤한다."""
+        if not self._page_y_offsets or page_num >= len(self._page_y_offsets):
+            return
+        sr = self.canvas.cget("scrollregion")
+        if not sr:
+            return
+        parts = str(sr).split()
+        if len(parts) < 4:
+            return
+        total_h = float(parts[3])
+        if total_h <= 0:
+            return
+        y_frac = self._page_y_offsets[page_num] / total_h
+        self.canvas.yview_moveto(y_frac)
+        if update_label:
+            self.current_page = page_num
+            self._update_page_label_continuous()
+
+    def _update_page_label_continuous(self):
+        """연속 모드에서 현재 보이는 페이지 번호를 라벨에 표시한다."""
+        self._page_label.config(
+            text=f"페이지 {self.current_page + 1} / {len(self.doc)}"
+        )
+
+    def _get_page_at_y(self, canvas_y: int) -> tuple[int, int]:
+        """캔버스 y 좌표에 해당하는 (페이지 번호, 페이지 y 시작) 를 반환한다."""
+        if not self._page_y_offsets:
+            return self.current_page, 0
+        page_num = 0
+        page_y0 = 0
+        for i, offset in enumerate(self._page_y_offsets):
+            if offset <= canvas_y:
+                page_num = i
+                page_y0 = offset
+            else:
+                break
+        return page_num, page_y0
+
     def _prev_page(self):
+        if self._continuous_scroll:
+            if self.current_page > 0:
+                self._scroll_to_page(self.current_page - 1)
+            return
         if self.current_page > 0:
             self.current_page -= 1
             self._render_page()
 
     def _next_page(self):
+        if self._continuous_scroll:
+            if self.current_page < len(self.doc) - 1:
+                self._scroll_to_page(self.current_page + 1)
+            return
         if self.current_page < len(self.doc) - 1:
             self.current_page += 1
             self._render_page()
@@ -204,12 +313,18 @@ class PDFViewer(ttk.Frame):
         return top <= 0.001
 
     def _on_mousewheel(self, event):
-        """Scroll within the page; flip to next/prev page when at the edge."""
-        # Determine scroll direction
+        """스크롤: 연속 모드는 끝없이 스크롤, 단일 모드는 페이지 끝에서 페이지 이동."""
         if hasattr(event, "delta") and event.delta != 0:
             going_down = event.delta < 0
         else:
             going_down = event.num == 5  # Button-5 is scroll-down on Linux
+
+        if self._continuous_scroll:
+            # 연속 모드: 페이지 전환 없이 캔버스를 계속 스크롤
+            self.canvas.yview_scroll(3 if going_down else -3, "units")
+            # 현재 보이는 페이지 번호 업데이트
+            self._update_visible_page()
+            return
 
         if going_down:
             if self._at_canvas_bottom():
@@ -221,6 +336,24 @@ class PDFViewer(ttk.Frame):
                 self._prev_page()
             else:
                 self.canvas.yview_scroll(-3, "units")
+
+    def _update_visible_page(self):
+        """연속 스크롤 모드에서 현재 화면 중앙에 보이는 페이지로 current_page를 갱신한다."""
+        if not self._page_y_offsets:
+            return
+        sr = self.canvas.cget("scrollregion")
+        if not sr:
+            return
+        parts = str(sr).split()
+        if len(parts) < 4:
+            return
+        total_h = float(parts[3])
+        top_frac, bot_frac = self.canvas.yview()
+        mid_y = (top_frac + bot_frac) / 2 * total_h
+        page_num, _ = self._get_page_at_y(int(mid_y))
+        if page_num != self.current_page:
+            self.current_page = page_num
+            self._update_page_label_continuous()
 
     def _on_mouse_down(self, event):
         self.canvas.focus_set()  # grab keyboard focus on click
@@ -265,15 +398,26 @@ class PDFViewer(ttk.Frame):
         ).start()
 
     def _do_translate(self, rx0: int, ry0: int, rx1: int, ry1: int):
-        if self._pil_img is None:
+        # 연속 스크롤 모드: 캔버스 y 좌표 → 해당 페이지 기준 상대 좌표로 변환
+        if self._continuous_scroll and self._page_y_offsets:
+            page_num, page_y0 = self._get_page_at_y(ry0)
+            pil_img = self._pil_pages[page_num] if page_num < len(self._pil_pages) else None
+            adj_ry0 = ry0 - page_y0
+            adj_ry1 = ry1 - page_y0
+        else:
+            page_num = self.current_page
+            pil_img = self._pil_img
+            adj_ry0, adj_ry1 = ry0, ry1
+
+        if pil_img is None:
             self._translation_result = (None, "[오류] 렌더된 페이지가 없습니다")
             self.event_generate("<<TranslationReady>>")
             return
 
-        w, h = self._pil_img.size
-        cropped = self._pil_img.crop((
-            max(0, rx0), max(0, ry0),
-            min(w, rx1), min(h, ry1),
+        w, h = pil_img.size
+        cropped = pil_img.crop((
+            max(0, rx0), max(0, adj_ry0),
+            min(w, rx1), min(h, adj_ry1),
         ))
 
         if self._translation_mode == "markdown":
@@ -284,10 +428,10 @@ class PDFViewer(ttk.Frame):
             # AI 분석(좌표 추정)과 크롭이 동일한 이미지 기준이 되어야
             # % 좌표가 정확히 일치한다.
             pdf_rect = fitz.Rect(
-                rx0 / self.zoom, ry0 / self.zoom,
-                rx1 / self.zoom, ry1 / self.zoom,
+                rx0 / self.zoom, adj_ry0 / self.zoom,
+                rx1 / self.zoom, adj_ry1 / self.zoom,
             )
-            page = self.doc[self.current_page]
+            page = self.doc[page_num]
             high_res = render_table_image(page, pdf_rect, dpi=150)
 
             # AI에 high_res 전달: 고해상도 이미지로 좌표 추정 정확도 향상
