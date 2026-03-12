@@ -27,8 +27,8 @@ def detect_tables(page: fitz.Page, pdf_rect: fitz.Rect) -> list[fitz.Rect]:
     rects: list[fitz.Rect] = []
     for tab in tab_finder.tables:
         r = fitz.Rect(tab.bbox)
-        # 테두리 여백 4pt 확장, 페이지 범위 클램프
-        r = fitz.Rect(r.x0 - 4, r.y0 - 4, r.x1 + 4, r.y1 + 4) & page.rect
+        # 테두리 여백 8pt 확장, 페이지 범위 클램프
+        r = fitz.Rect(r.x0 - 8, r.y0 - 8, r.x1 + 8, r.y1 + 8) & page.rect
         if not r.is_empty:
             rects.append(r)
 
@@ -64,6 +64,7 @@ def crop_table_pct(
     y_pct: float,
     w_pct: float,
     h_pct: float,
+    padding_px: int = 8,
 ) -> Image.Image:
     """PIL 이미지에서 퍼센트 좌표로 표 영역을 크롭한다.
 
@@ -71,17 +72,18 @@ def crop_table_pct(
     픽셀 좌표로 변환하여 크롭한 PIL.Image를 반환한다.
 
     Args:
-        image: 전체 선택 영역의 고해상도 PIL 이미지
-        x_pct: 표 왼쪽 x좌표 / 이미지 너비 × 100
-        y_pct: 표 위쪽  y좌표 / 이미지 높이 × 100
-        w_pct: 표 너비   / 이미지 너비  × 100
-        h_pct: 표 높이   / 이미지 높이  × 100
+        image:      전체 선택 영역의 고해상도 PIL 이미지
+        x_pct:      표 왼쪽 x좌표 / 이미지 너비 × 100
+        y_pct:      표 위쪽  y좌표 / 이미지 높이 × 100
+        w_pct:      표 너비   / 이미지 너비  × 100
+        h_pct:      표 높이   / 이미지 높이  × 100
+        padding_px: 크롭 후 상하좌우에 추가할 여백 (픽셀, 기본 8px)
     """
     W, H = image.size
-    x0 = max(0, int(x_pct / 100 * W))
-    y0 = max(0, int(y_pct / 100 * H))
-    x1 = min(W, int((x_pct + w_pct) / 100 * W))
-    y1 = min(H, int((y_pct + h_pct) / 100 * H))
+    x0 = max(0, int(x_pct / 100 * W) - padding_px)
+    y0 = max(0, int(y_pct / 100 * H) - padding_px)
+    x1 = min(W, int((x_pct + w_pct) / 100 * W) + padding_px)
+    y1 = min(H, int((y_pct + h_pct) / 100 * H) + padding_px)
     return image.crop((x0, y0, x1, y1))
 
 
@@ -109,9 +111,9 @@ def inject_table_images(
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
 
-    def _figure(b64: str) -> str:
+    def _figure(b64: str, flex_val: int = 1) -> str:
         return (
-            f'<figure style="margin:0;flex:1;min-width:0;">'
+            f'<figure style="margin:0;flex:{flex_val};min-width:0;">'
             f'<img src="data:image/png;base64,{b64}" '
             f'style="max-width:100%;border:1px solid #d0d0d0;'
             f'border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.12);">'
@@ -129,13 +131,16 @@ def inject_table_images(
 
     # 2-column: [TABLE_0] + [TABLE_1]을 flex 컨테이너로 묶어 좌우 배치
     if layout == "2col" and len(table_images) >= 2:
+        # 픽셀 폭을 flex 비율로 사용 → 원본 PDF 크기 비율 재현
+        w0 = table_images[0].width
+        w1 = table_images[1].width
         b64_0 = _to_b64(table_images[0])
         b64_1 = _to_b64(table_images[1])
         flex_html = (
             '<div style="display:flex;gap:12px;align-items:flex-start;'
             'margin:1.2em 0;">'
-            + _figure(b64_0)
-            + _figure(b64_1)
+            + _figure(b64_0, flex_val=w0)
+            + _figure(b64_1, flex_val=w1)
             + '</div>'
         )
         # 케이스 A: 두 마커가 별개 <p> 문단에 존재 (정상 케이스)
