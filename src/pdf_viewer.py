@@ -8,7 +8,10 @@ from PIL import Image, ImageTk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
-from src.translator import translate_region, translate_to_markdown
+from src.translator import (
+    translate_region,
+    translate_to_markdown,
+)
 
 
 class PDFViewer(ttk.Frame):
@@ -253,9 +256,66 @@ class PDFViewer(ttk.Frame):
         ))
 
         if self._translation_mode == "markdown":
-            result = translate_to_markdown(cropped)
+            from src.table_handler import detect_tables, render_table_image, crop_table_pct
+            from src.translator import analyze_and_translate
+
+            # high_res를 먼저 렌더한다.
+            # AI 분석(좌표 추정)과 크롭이 동일한 이미지 기준이 되어야
+            # % 좌표가 정확히 일치한다.
+            pdf_rect = fitz.Rect(
+                rx0 / self.zoom, ry0 / self.zoom,
+                rx1 / self.zoom, ry1 / self.zoom,
+            )
+            page = self.doc[self.current_page]
+            high_res = render_table_image(page, pdf_rect, dpi=150)
+
+            # AI에 high_res 전달: 고해상도 이미지로 좌표 추정 정확도 향상
+            layout_info = analyze_and_translate(high_res)
+            md       = layout_info["markdown"]
+            layout   = layout_info["layout"]
+            tbl_meta = layout_info["tables"]   # [{id, x_pct, y_pct, w_pct, h_pct}, ...]
+
+            import re as _re
+            markers = _re.findall(r'\[TABLE_\d+\]', md, _re.IGNORECASE)
+
+            if markers and layout_info["has_tables"]:
+                # [1순위] PyMuPDF 정밀 크롭
+                table_rects = detect_tables(page, pdf_rect)
+                if table_rects and len(table_rects) >= len(markers):
+                    table_images = [
+                        render_table_image(page, r)
+                        for r in table_rects[:len(markers)]
+                    ]
+
+                elif tbl_meta:
+                    # [2순위] AI % 좌표로 개별 크롭 (분석에 사용한 high_res 그대로 사용)
+                    table_images = [
+                        crop_table_pct(
+                            high_res,
+                            t["x_pct"], t["y_pct"],
+                            t["w_pct"], t["h_pct"],
+                        )
+                        for t in tbl_meta[:len(markers)]
+                    ]
+                    if len(table_images) < len(markers):
+                        table_images += [high_res] * (len(markers) - len(table_images))
+
+                else:
+                    # [최후 fallback] 전체 선택 이미지
+                    table_images = [high_res] * len(markers)
+
+                result = {
+                    "type":         "table_aware",
+                    "markdown":     md,
+                    "table_images": table_images,
+                    "layout":       layout,
+                }
+            else:
+                # AI가 표 없다고 판단 → 일반 마크다운으로 처리
+                result = md
         else:
             result = translate_region(cropped)
+
         self._translation_result = (cropped, result)
         self.event_generate("<<TranslationReady>>")
 

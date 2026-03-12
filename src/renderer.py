@@ -92,6 +92,88 @@ MathJax = {
 </html>"""
 
 
+def _scan_inline_dollar_math(text: str, store: dict, counter: list) -> str:
+    """문자 단위 스캔으로 $…$ 인라인 수식을 추출·플레이스홀더로 치환한다.
+
+    regex 방식의 엣지 케이스(유니코드 공백, Windows 개행, 특수 선행문자 등)를
+    완전히 우회한다. 비탐욕(non-greedy): 항상 가장 가까운 닫는 $를 선택.
+
+    규칙:
+    - $$ 는 건너뜀 (display math는 이미 처리됨)
+    - $ 뒤 첫 문자가 공백(Unicode 포함) 또는 십진수이면 수식 아님 ($10, $ price)
+    - 빈 줄(\\n\\n)을 만나면 닫는 $ 탐색 중단
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        ch = text[i]
+
+        if ch != '$':
+            out.append(ch)
+            i += 1
+            continue
+
+        # '$' 발견
+        # Guard 0: ASCII 알파뉴메릭 또는 LaTeX 닫는 기호({, ), ]) 뒤 '$' 는
+        #          닫는 구분자 → 새 여는 구분자로 처리하지 않음.
+        #          예: "$1 < t \leq T$에 대한" 에서 T 뒤의 $가 여는 기호로
+        #          잘못 처리되어 이후 수식이 깨지는 문제 방지.
+        #          (Korean/Unicode 문자는 isalnum()이 True여도 여기서는 제외)
+        if i > 0 and (
+            'a' <= text[i - 1] <= 'z'
+            or 'A' <= text[i - 1] <= 'Z'
+            or '0' <= text[i - 1] <= '9'
+            or text[i - 1] in '})]'
+        ):
+            out.append(ch)
+            i += 1
+            continue
+
+        # Guard 1: '$$' 는 건너뜀 (display math placeholder 뒤 남은 $ 포함)
+        if i + 1 < n and text[i + 1] == '$':
+            out.append(ch)
+            i += 1
+            continue
+
+        # Guard 2: $ 바로 다음이 공백(Unicode 포함) 또는 십진수이면 수식 아님
+        if i + 1 >= n or text[i + 1].isspace() or text[i + 1].isdecimal():
+            out.append(ch)
+            i += 1
+            continue
+
+        # 닫는 '$' 탐색 (빈 줄에서 중단)
+        j = i + 1
+        found_close = -1
+        while j < n:
+            c = text[j]
+            if c == '$':
+                if j + 1 < n and text[j + 1] == '$':
+                    j += 2          # $$ 는 닫는 기호로 인정하지 않음
+                    continue
+                found_close = j
+                break
+            if c == '\n' and j + 1 < n and text[j + 1] == '\n':
+                break               # 빈 줄 = 문단 경계 → 중단
+            j += 1
+
+        if found_close == -1:
+            out.append(ch)
+            i += 1
+            continue
+
+        # 수식 추출 ($ 구분자 포함)
+        formula = text[i:found_close + 1]
+        key = f"XAMATHINLNX{counter[0]:05d}XAMATHINLNX"
+        store[key] = formula
+        counter[0] += 1
+        out.append(key)
+        i = found_close + 1
+
+    return ''.join(out)
+
+
 def _extract_math(text: str) -> tuple[str, dict]:
     """Replace math expressions with safe ASCII placeholders before mistune.
 
@@ -117,10 +199,10 @@ def _extract_math(text: str) -> tuple[str, dict]:
     # Display math first (may span multiple lines)
     text = re.sub(r'\$\$[\s\S]*?\$\$', save_disp, text)
     text = re.sub(r'\\\[[\s\S]*?\\\]', save_disp, text)
-    # Inline math: \(...\) and $...$ forms
+    # Inline math: \(...\) form
     text = re.sub(r'\\\([\s\S]*?\\\)', save_inln, text)
-    # Inline $...$: NOT followed by digit/space/newline (avoids $10, $ price etc.)
-    text = re.sub(r'\$(?=[^\$\s\d\n])([^\$\n]*?)\$', save_inln, text)
+    # Inline $...$: 문자 스캔 방식 — regex 엣지 케이스 완전 우회
+    text = _scan_inline_dollar_math(text, store, counter)
 
     return text, store
 
@@ -131,9 +213,14 @@ def _restore_math(html: str, store: dict) -> str:
     The original delimiters ($...$, $$...$$, \\(...\\), \\[...\\]) are preserved
     exactly so MathJax can process them without any conversion errors.
     MathJax is configured to handle all four delimiter forms.
+
+    '<' is HTML-escaped to '&lt;' to prevent the HTML parser from interpreting
+    LaTeX operators (e.g. $a < b$) as tag openers. MathJax reads DOM text nodes
+    where the entity has already been decoded back to '<', so rendering is correct.
     """
     for key, value in store.items():
-        html = html.replace(key, value)
+        safe = value.replace('<', '&lt;')
+        html = html.replace(key, safe)
     return html
 
 
@@ -196,6 +283,68 @@ async def _launch_browser(p):
         except Exception:
             pass
     return await p.chromium.launch(headless=True)
+
+
+def _protect_table_markers(text: str) -> tuple[str, dict]:
+    """[TABLE_N] 마커를 mistune 처리 전에 추출한다.
+
+    mistune은 [text] 형식을 링크 참조로 파싱할 수 있어 [TABLE_N] 마커가
+    변형될 수 있다. _extract_math()와 동일한 방식으로 마커를 고유 키로
+    치환하여 보호하고, 나중에 _restore_table_markers()로 복원한다.
+
+    각 마커는 앞뒤에 빈 줄을 추가해 독립된 문단으로 보장한다.
+    """
+    import re as _re
+    store: dict[str, str] = {}
+
+    def _save(m: re.Match) -> str:
+        n = int(m.group(1))
+        key = f"XTABLEX{n:05d}XTABLEX"
+        store[key] = f"[TABLE_{n}]"
+        # 앞뒤 빈 줄: mistune이 독립 <p>로 렌더링하도록 보장
+        return f"\n\n{key}\n\n"
+
+    protected = _re.sub(r'\[TABLE_(\d+)\]', _save, text, flags=_re.IGNORECASE)
+    return protected, store
+
+
+def _restore_table_markers(html: str, store: dict) -> str:
+    """XTABLEX 플레이스홀더를 원래 [TABLE_N] 마커로 복원한다."""
+    for key, value in store.items():
+        html = html.replace(key, value)
+    return html
+
+
+def markdown_with_tables_to_pdf_bytes(
+    markdown_text: str,
+    table_images: list,
+    layout: str = "single",
+) -> bytes:
+    """표 이미지가 포함된 마크다운 → PDF bytes.
+
+    [TABLE_N] 마커를 mistune 전에 추출(보호)하고, mistune 이후 복원한 뒤
+    실제 이미지 태그로 교체한다. 이 방식으로 mistune의 링크 파싱 간섭을 방지.
+
+    Args:
+        markdown_text: [TABLE_0] … 플레이스홀더가 포함된 마크다운 문자열
+        table_images:  PIL.Image 리스트 (순서대로 TABLE_0, TABLE_1, …에 대응)
+        layout:        AI가 분석한 레이아웃 ("single" | "2col" | "stacked" | "mixed")
+    """
+    from src.table_handler import inject_table_images
+
+    # 1) [TABLE_N] 마커를 mistune 전에 XTABLEX 키로 치환 (링크 파싱 방지)
+    protected_md, table_store = _protect_table_markers(markdown_text)
+
+    # 2) mistune + math 보호 파이프라인 (XTABLEX는 평범한 텍스트로 통과)
+    html = markdown_to_html(protected_md)
+
+    # 3) XTABLEX → [TABLE_N] 복원 (이 시점에는 반드시 <p>[TABLE_N]</p> 형태)
+    html = _restore_table_markers(html, table_store)
+
+    # 4) [TABLE_N] → 레이아웃 반영 이미지 태그 교체
+    html = inject_table_images(html, table_images, layout)
+
+    return asyncio.run(_playwright_to_pdf(html))
 
 
 def open_in_browser(markdown_text: str) -> str:
