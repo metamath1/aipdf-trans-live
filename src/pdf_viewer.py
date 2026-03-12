@@ -257,27 +257,50 @@ class PDFViewer(ttk.Frame):
         ))
 
         if self._translation_mode == "markdown":
-            # 표 감지: canvas 좌표 → PDF 포인트 좌표로 변환
-            pdf_rect = fitz.Rect(
-                rx0 / self.zoom, ry0 / self.zoom,
-                rx1 / self.zoom, ry1 / self.zoom,
-            )
-            page = self.doc[self.current_page]
+            # AI가 표 유무를 판단 (TABLE_AWARE_PROMPT: 표 위치에 [TABLE_N] 마커 삽입)
+            # PyMuPDF find_tables()보다 AI Vision이 복잡한 학술 표 감지에 더 신뢰성 높음
+            md = translate_to_markdown_table_aware(cropped, max_tables=5)
 
-            from src.table_handler import detect_tables, render_table_image
-            table_rects = detect_tables(page, pdf_rect)
+            import re as _re
+            markers = _re.findall(r'\[TABLE_\d+\]', md, _re.IGNORECASE)
 
-            if table_rects:
-                # 각 표를 원본 PDF에서 고해상도 이미지로 추출
-                table_images = [render_table_image(page, r) for r in table_rects]
-                md = translate_to_markdown_table_aware(cropped, len(table_images))
+            if markers:
+                # AI가 표를 감지함 → 원본 PDF에서 표 이미지 추출
+                pdf_rect = fitz.Rect(
+                    rx0 / self.zoom, ry0 / self.zoom,
+                    rx1 / self.zoom, ry1 / self.zoom,
+                )
+                page = self.doc[self.current_page]
+
+                from src.table_handler import detect_tables, render_table_image
+                table_rects = detect_tables(page, pdf_rect)
+
+                if table_rects and len(table_rects) >= len(markers):
+                    # PyMuPDF가 정확한 표 영역을 찾은 경우 – 정밀 크롭
+                    table_images = [
+                        render_table_image(page, r)
+                        for r in table_rects[: len(markers)]
+                    ]
+                else:
+                    # PyMuPDF 감지 실패 또는 수 불일치
+                    # → 전체 선택 영역을 고해상도로 렌더링해 모든 마커에 공유
+                    full_img = render_table_image(page, pdf_rect)
+                    if table_rects:
+                        # 일부는 정밀 크롭, 나머지는 전체 이미지로 보완
+                        table_images = [render_table_image(page, r) for r in table_rects]
+                        table_images += [full_img] * (len(markers) - len(table_rects))
+                    else:
+                        table_images = [full_img] * len(markers)
+
                 result = {
                     "type": "table_aware",
                     "markdown": md,
                     "table_images": table_images,
                 }
             else:
-                result = translate_to_markdown(cropped)
+                # AI가 표 없다고 판단 → 일반 마크다운으로 처리
+                # (TABLE_AWARE_PROMPT도 표 없으면 MARKDOWN_PROMPT와 동일한 출력)
+                result = md
         else:
             result = translate_region(cropped)
 

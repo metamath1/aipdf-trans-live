@@ -155,15 +155,20 @@ def translate_to_markdown(image: Image.Image) -> str:
         return f"[번역 오류 – {backend}] {exc}"
 
 
-def translate_to_markdown_table_aware(image: Image.Image, table_count: int) -> str:
+def translate_to_markdown_table_aware(
+    image: Image.Image,
+    table_count: int = 0,
+    max_tables: int = 5,
+) -> str:
     """표 위치에 [TABLE_N] 플레이스홀더를 삽입하는 마크다운 번역.
 
-    표가 감지된 경우 사용. AI는 표 내용은 번역하지 않고 플레이스홀더만 남기며,
-    표 캡션·제목 등 나머지 텍스트는 한국어 마크다운으로 번역한다.
+    AI가 이미지 안에 표가 있는지 스스로 판단하여 [TABLE_0], [TABLE_1] …
+    마커를 삽입한다. 표가 없으면 일반 마크다운 번역 결과를 반환한다.
 
     Args:
         image:       드래그 선택 영역 PIL 이미지
-        table_count: 감지된 표 개수 (프롬프트 힌트용)
+        table_count: (미사용, 하위 호환) 구 버전 호출부를 위한 파라미터
+        max_tables:  최대 표 개수 힌트 (프롬프트에 직접 영향 없음)
     """
     backend = get_backend()
     prompt = TABLE_AWARE_PROMPT
