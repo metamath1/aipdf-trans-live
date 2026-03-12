@@ -117,19 +117,28 @@ class TranslationPanel(ttk.Frame):
         threading.Thread(target=self._generate_pdf, args=(markdown,), daemon=True).start()
 
     def show_table_aware_result(
-        self, markdown: str, table_images: list, layout: str = "single"
+        self, markdown: str, table_images: list, layout: str = "single",
+        figure_images: list | None = None, fig_layout: str = "single",
     ):
-        """표 이미지 보존 모드: [TABLE_N] 플레이스홀더 마크다운 + 실제 표 이미지로 PDF 생성."""
+        """표·그림 이미지 보존 모드: 플레이스홀더 마크다운 + 캡처 이미지로 PDF 생성."""
         self._current_markdown = markdown
         self._table_images = table_images
         self._pdf_bytes = None
         self._show_text_view()
-        self._set_text("PDF 생성 중… (표 이미지 삽입)")
+        n_fig = len(figure_images) if figure_images else 0
+        msg = "PDF 생성 중…"
+        if table_images and figure_images:
+            msg = f"PDF 생성 중… (표 {len(table_images)}개 + 그림 {n_fig}개 삽입)"
+        elif table_images:
+            msg = f"PDF 생성 중… (표 {len(table_images)}개 삽입)"
+        elif figure_images:
+            msg = f"PDF 생성 중… (그림 {n_fig}개 삽입)"
+        self._set_text(msg)
         self._status_label.config(text="렌더링 중…")
         self._open_btn.config(state=DISABLED)
         threading.Thread(
             target=self._generate_pdf_with_tables,
-            args=(markdown, table_images, layout),
+            args=(markdown, table_images, layout, figure_images, fig_layout),
             daemon=True,
         ).start()
 
@@ -157,12 +166,15 @@ class TranslationPanel(ttk.Frame):
     # --------------------------------------------------------------- private --
 
     def _generate_pdf_with_tables(
-        self, markdown: str, table_images: list, layout: str = "single"
+        self, markdown: str, table_images: list, layout: str = "single",
+        figure_images: list | None = None, fig_layout: str = "single",
     ):
-        """표 이미지 포함 PDF 생성 (백그라운드 스레드)."""
+        """표·그림 이미지 포함 PDF 생성 (백그라운드 스레드)."""
         try:
             from src.renderer import markdown_with_tables_to_pdf_bytes
-            pdf_bytes = markdown_with_tables_to_pdf_bytes(markdown, table_images, layout)
+            pdf_bytes = markdown_with_tables_to_pdf_bytes(
+                markdown, table_images, layout, figure_images, fig_layout
+            )
             self.after(0, self._on_pdf_ready, pdf_bytes)
         except Exception as exc:
             self.after(0, self._on_pdf_error, markdown, str(exc))

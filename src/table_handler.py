@@ -188,3 +188,102 @@ def inject_table_images(
             html = pat_loose.sub(_figure_block(b64), html)
 
     return html
+
+
+# ---------------------------------------------------------------------------
+# HTML 내 [FIGURE_N] 플레이스홀더 → <figure><img> 교체
+# ---------------------------------------------------------------------------
+
+def inject_figure_images(
+    html: str,
+    figure_images: list[Image.Image],
+    layout: str = "single",
+) -> str:
+    """HTML 내 ``<p>[FIGURE_N]</p>`` 패턴을 레이아웃에 맞는 이미지 태그로 교체한다.
+
+    Args:
+        html:          mistune 변환 후의 HTML 문자열
+        figure_images: PIL.Image 리스트 (순서대로 FIGURE_0, FIGURE_1, …에 대응)
+        layout:        그림 레이아웃 ("single" | "2col" | "stacked")
+
+    Returns:
+        그림 이미지가 삽입된 HTML 문자열
+    """
+    def _to_b64(img: Image.Image) -> str:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    def _inline_fig(b64: str, flex_val: int = 1) -> str:
+        return (
+            f'<figure style="margin:0;flex:{flex_val};min-width:0;text-align:center;">'
+            f'<img src="data:image/png;base64,{b64}" '
+            f'style="max-width:100%;border:1px solid #d0d0d0;'
+            f'border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.12);">'
+            f'</figure>'
+        )
+
+    def _block_fig(b64: str) -> str:
+        return (
+            f'<figure style="margin:1.2em 0;text-align:center;">'
+            f'<img src="data:image/png;base64,{b64}" '
+            f'style="max-width:100%;border:1px solid #d0d0d0;'
+            f'border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.12);">'
+            f'</figure>'
+        )
+
+    # 2-column: FIGURE_0 + FIGURE_1을 flex 컨테이너로 묶어 좌우 배치
+    if layout == "2col" and len(figure_images) >= 2:
+        w0 = figure_images[0].width
+        w1 = figure_images[1].width
+        b64_0 = _to_b64(figure_images[0])
+        b64_1 = _to_b64(figure_images[1])
+        flex_html = (
+            '<div style="display:flex;gap:12px;align-items:flex-start;'
+            'margin:1.2em 0;">'
+            + _inline_fig(b64_0, flex_val=w0)
+            + _inline_fig(b64_1, flex_val=w1)
+            + '</div>'
+        )
+        # 케이스 A: 두 마커가 별개 <p>에 존재
+        pat_sep = re.compile(
+            r'<p[^>]*>\s*\[FIGURE_0\]\s*</p>\s*<p[^>]*>\s*\[FIGURE_1\]\s*</p>',
+            re.IGNORECASE,
+        )
+        # 케이스 B: AI가 같은 줄에 출력 → 하나의 <p>로 묶인 경우
+        pat_same = re.compile(
+            r'<p[^>]*>[^<]*\[FIGURE_0\][^<]*\[FIGURE_1\][^<]*</p>',
+            re.IGNORECASE,
+        )
+        if pat_sep.search(html):
+            html = pat_sep.sub(flex_html, html)
+        elif pat_same.search(html):
+            html = pat_same.sub(flex_html, html)
+        else:
+            html = re.sub(
+                r'<p[^>]*>[^<]*\[FIGURE_0\][^<]*</p>',
+                _block_fig(b64_0), html, flags=re.IGNORECASE,
+            )
+            html = re.sub(
+                r'<p[^>]*>[^<]*\[FIGURE_1\][^<]*</p>',
+                _block_fig(b64_1), html, flags=re.IGNORECASE,
+            )
+        # 나머지 마커(3개 이상인 경우) 순차 처리
+        for i, img in enumerate(figure_images[2:], start=2):
+            html = re.sub(
+                rf'<p[^>]*>[^<]*\[FIGURE_{i}\][^<]*</p>',
+                _block_fig(_to_b64(img)), html, flags=re.IGNORECASE,
+            )
+        return html
+
+    # single / stacked: 순차 치환
+    for i, img in enumerate(figure_images):
+        b64 = _to_b64(img)
+        pat_strict = re.compile(rf'<p[^>]*>\s*\[FIGURE_{i}\]\s*</p>', re.IGNORECASE)
+        pat_loose  = re.compile(rf'<p[^>]*>[^<]*\[FIGURE_{i}\][^<]*</p>', re.IGNORECASE)
+        if pat_strict.search(html):
+            html = pat_strict.sub(_block_fig(b64), html)
+        elif pat_loose.search(html):
+            html = pat_loose.sub(_block_fig(b64), html)
+
+    return html

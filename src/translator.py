@@ -207,6 +207,7 @@ LAYOUT_ANALYSIS_PROMPT = """\
 
 {
   "has_tables": <true 또는 false>,
+  "has_figures": <true 또는 false>,
   "layout": "<single | 2col | stacked | mixed>",
   "tables": [
     {
@@ -218,24 +219,38 @@ LAYOUT_ANALYSIS_PROMPT = """\
       "caption_ko": "<표 제목을 한국어로 번역>"
     }
   ],
-  "markdown": "<나머지 텍스트를 한국어로 번역. 각 표 위치에 [TABLE_0], [TABLE_1] 등을 단독 문단으로 삽입 (앞뒤 빈 줄). 수식은 $...$, $$...$$ 원본 LaTeX 유지. Markdown 형식>"
+  "figures": [
+    {
+      "id": 0,
+      "x_pct": <그림의 가장 왼쪽 x좌표 ÷ 이미지 전체 너비 × 100. 캡션 포함. 소수점 1자리>,
+      "y_pct": <그림의 가장 위쪽 y좌표 ÷ 이미지 전체 높이 × 100. 캡션 포함. 소수점 1자리>,
+      "w_pct": <그림 전체 너비 ÷ 이미지 너비 × 100. 소수점 1자리>,
+      "h_pct": <그림 전체 높이(캡션까지) ÷ 이미지 높이 × 100. 소수점 1자리>,
+      "caption_ko": "<그림 캡션을 한국어로 번역>"
+    }
+  ],
+  "markdown": "<나머지 텍스트를 한국어로 번역. 각 표 위치에 [TABLE_0], [TABLE_1] 등을 단독 문단으로 삽입 (앞뒤 빈 줄). 각 그림/이미지/차트/다이어그램 위치에 [FIGURE_0], [FIGURE_1] 등을 단독 문단으로 삽입 (앞뒤 빈 줄). 수식은 $...$, $$...$$ 원본 LaTeX 유지. Markdown 형식>"
 }
 
 좌표 측정 기준:
 - 이미지 좌상단이 (0, 0), 우하단이 (100, 100)
 - x_pct + w_pct ≤ 100, y_pct + h_pct ≤ 100 이어야 함
 - 표 캡션(Table 1: ...)이 있으면 반드시 y_pct에 포함 (캡션 위쪽 라인부터 시작)
-- 표 외곽선(border)의 바깥쪽을 기준으로 측정 (안쪽 셀 기준 아님)
-- 좌우 여백(margin)은 포함하지 않음 (표 자체 영역만)
+- 그림 캡션(Figure 1: ...)이 있으면 반드시 y_pct 또는 h_pct에 포함
+- 표·그림 외곽선의 바깥쪽을 기준으로 측정 (안쪽 콘텐츠 기준 아님)
+- 좌우 여백(margin)은 포함하지 않음 (콘텐츠 자체 영역만)
 - 2col 레이아웃: 두 표가 좌우 나란히 있을 때 각 표를 개별 bounding box로 측정
 
-layout 값:
+layout 값 (표에만 적용):
 - single  : 표 1개
 - 2col    : 표 2개가 좌우 나란히 (2단 편집)
 - stacked : 표 2개+ 위아래 배치
 - mixed   : 3개+ 또는 복잡한 배치
 
-표가 없으면 has_tables=false, tables=[], layout="single", markdown에 전체 번역 결과 출력.
+그림(figure)이란: 사진, 차트, 그래프, 다이어그램, 모식도 등 텍스트가 아닌 시각적 콘텐츠.
+표가 없으면 has_tables=false, tables=[], layout="single".
+그림이 없으면 has_figures=false, figures=[].
+표도 그림도 없으면 markdown에 전체 번역 결과만 출력.
 """
 
 
@@ -298,17 +313,19 @@ def _claude_vision_with_model(
 def analyze_and_translate(image: Image.Image) -> dict:
     """레이아웃 분석 + 번역을 1회 API 호출로 수행.
 
-    AI가 이미지의 표 레이아웃(위치·배치)을 분석하고 번역까지 한번에 반환한다.
+    AI가 이미지의 표·그림 레이아웃(위치·배치)을 분석하고 번역까지 한번에 반환한다.
     LAYOUT_MODEL 환경변수로 번역 모델과 다른 강력한 모델을 지정할 수 있다.
 
     Returns:
         {
-          "has_tables": bool,
-          "layout": str,      # "single" | "2col" | "stacked" | "mixed"
-          "tables": list,     # [{id, x_pct, y_pct, w_pct, h_pct, caption_ko}, ...]
-          "markdown": str,    # [TABLE_N] 마커 포함 번역 마크다운
+          "has_tables":  bool,
+          "has_figures": bool,
+          "layout":      str,   # "single" | "2col" | "stacked" | "mixed"
+          "tables":      list,  # [{id, x_pct, y_pct, w_pct, h_pct, caption_ko}, ...]
+          "figures":     list,  # [{id, x_pct, y_pct, w_pct, h_pct, caption_ko}, ...]
+          "markdown":    str,   # [TABLE_N] / [FIGURE_N] 마커 포함 번역 마크다운
         }
-        JSON 파싱 실패 시 has_tables=False, markdown=raw 응답 텍스트
+        JSON 파싱 실패 시 has_tables=False, has_figures=False, markdown=raw 응답 텍스트
     """
     backend, model = get_layout_model_backend()
     try:
@@ -319,27 +336,33 @@ def analyze_and_translate(image: Image.Image) -> dict:
         )
     except Exception as exc:
         return {
-            "has_tables": False,
-            "layout": "single",
-            "tables": [],
-            "markdown": f"[번역 오류 – {backend}/{model}] {exc}",
+            "has_tables":  False,
+            "has_figures": False,
+            "layout":      "single",
+            "tables":      [],
+            "figures":     [],
+            "markdown":    f"[번역 오류 – {backend}/{model}] {exc}",
         }
 
     data = _parse_layout_json(raw)
     if data and "markdown" in data:
         return {
-            "has_tables": bool(data.get("has_tables", False)),
-            "layout":     data.get("layout", "single"),
-            "tables":     data.get("tables", []),
-            "markdown":   data["markdown"],
+            "has_tables":  bool(data.get("has_tables", False)),
+            "has_figures": bool(data.get("has_figures", False)),
+            "layout":      data.get("layout", "single"),
+            "tables":      data.get("tables", []),
+            "figures":     data.get("figures", []),
+            "markdown":    data["markdown"],
         }
 
     # JSON 파싱 실패 → raw 텍스트 자체를 마크다운으로 fallback
     return {
-        "has_tables": False,
-        "layout": "single",
-        "tables": [],
-        "markdown": raw,
+        "has_tables":  False,
+        "has_figures": False,
+        "layout":      "single",
+        "tables":      [],
+        "figures":     [],
+        "markdown":    raw,
     }
 
 

@@ -285,64 +285,87 @@ async def _launch_browser(p):
     return await p.chromium.launch(headless=True)
 
 
-def _protect_table_markers(text: str) -> tuple[str, dict]:
-    """[TABLE_N] 마커를 mistune 처리 전에 추출한다.
+def _protect_media_markers(text: str) -> tuple[str, dict]:
+    """[TABLE_N] 및 [FIGURE_N] 마커를 mistune 처리 전에 추출한다.
 
-    mistune은 [text] 형식을 링크 참조로 파싱할 수 있어 [TABLE_N] 마커가
-    변형될 수 있다. _extract_math()와 동일한 방식으로 마커를 고유 키로
-    치환하여 보호하고, 나중에 _restore_table_markers()로 복원한다.
+    mistune은 [text] 형식을 링크 참조로 파싱할 수 있어 마커가 변형될 수 있다.
+    _extract_math()와 동일한 방식으로 마커를 고유 키로 치환하여 보호하고,
+    나중에 _restore_media_markers()로 복원한다.
 
     각 마커는 앞뒤에 빈 줄을 추가해 독립된 문단으로 보장한다.
     """
     import re as _re
     store: dict[str, str] = {}
 
-    def _save(m: re.Match) -> str:
+    def _save_table(m: re.Match) -> str:
         n = int(m.group(1))
         key = f"XTABLEX{n:05d}XTABLEX"
         store[key] = f"[TABLE_{n}]"
-        # 앞뒤 빈 줄: mistune이 독립 <p>로 렌더링하도록 보장
         return f"\n\n{key}\n\n"
 
-    protected = _re.sub(r'\[TABLE_(\d+)\]', _save, text, flags=_re.IGNORECASE)
+    def _save_figure(m: re.Match) -> str:
+        n = int(m.group(1))
+        key = f"XFIGUREX{n:05d}XFIGUREX"
+        store[key] = f"[FIGURE_{n}]"
+        return f"\n\n{key}\n\n"
+
+    protected = _re.sub(r'\[TABLE_(\d+)\]', _save_table, text, flags=_re.IGNORECASE)
+    protected = _re.sub(r'\[FIGURE_(\d+)\]', _save_figure, protected, flags=_re.IGNORECASE)
     return protected, store
 
 
-def _restore_table_markers(html: str, store: dict) -> str:
-    """XTABLEX 플레이스홀더를 원래 [TABLE_N] 마커로 복원한다."""
+def _restore_media_markers(html: str, store: dict) -> str:
+    """XTABLEX / XFIGUREX 플레이스홀더를 원래 마커로 복원한다."""
     for key, value in store.items():
         html = html.replace(key, value)
     return html
+
+
+# 하위 호환 별칭
+def _protect_table_markers(text: str) -> tuple[str, dict]:
+    return _protect_media_markers(text)
+
+
+def _restore_table_markers(html: str, store: dict) -> str:
+    return _restore_media_markers(html, store)
 
 
 def markdown_with_tables_to_pdf_bytes(
     markdown_text: str,
     table_images: list,
     layout: str = "single",
+    figure_images: list | None = None,
+    fig_layout: str = "single",
 ) -> bytes:
-    """표 이미지가 포함된 마크다운 → PDF bytes.
+    """표·그림 이미지가 포함된 마크다운 → PDF bytes.
 
-    [TABLE_N] 마커를 mistune 전에 추출(보호)하고, mistune 이후 복원한 뒤
-    실제 이미지 태그로 교체한다. 이 방식으로 mistune의 링크 파싱 간섭을 방지.
+    [TABLE_N] / [FIGURE_N] 마커를 mistune 전에 추출(보호)하고, mistune 이후
+    복원한 뒤 실제 이미지 태그로 교체한다. mistune의 링크 파싱 간섭을 방지.
 
     Args:
-        markdown_text: [TABLE_0] … 플레이스홀더가 포함된 마크다운 문자열
-        table_images:  PIL.Image 리스트 (순서대로 TABLE_0, TABLE_1, …에 대응)
-        layout:        AI가 분석한 레이아웃 ("single" | "2col" | "stacked" | "mixed")
+        markdown_text:  [TABLE_0] / [FIGURE_0] … 플레이스홀더가 포함된 마크다운
+        table_images:   PIL.Image 리스트 (TABLE_0, TABLE_1, …에 대응)
+        layout:         AI가 분석한 표 레이아웃 ("single" | "2col" | "stacked" | "mixed")
+        figure_images:  PIL.Image 리스트 (FIGURE_0, FIGURE_1, …에 대응). None이면 그림 없음.
+        fig_layout:     그림 레이아웃 ("single" | "2col" | "stacked")
     """
-    from src.table_handler import inject_table_images
+    from src.table_handler import inject_table_images, inject_figure_images
 
-    # 1) [TABLE_N] 마커를 mistune 전에 XTABLEX 키로 치환 (링크 파싱 방지)
-    protected_md, table_store = _protect_table_markers(markdown_text)
+    # 1) [TABLE_N] / [FIGURE_N] 마커를 mistune 전에 키로 치환 (링크 파싱 방지)
+    protected_md, media_store = _protect_media_markers(markdown_text)
 
-    # 2) mistune + math 보호 파이프라인 (XTABLEX는 평범한 텍스트로 통과)
+    # 2) mistune + math 보호 파이프라인 (키는 평범한 텍스트로 통과)
     html = markdown_to_html(protected_md)
 
-    # 3) XTABLEX → [TABLE_N] 복원 (이 시점에는 반드시 <p>[TABLE_N]</p> 형태)
-    html = _restore_table_markers(html, table_store)
+    # 3) 키 → [TABLE_N] / [FIGURE_N] 복원 (이 시점엔 반드시 <p>[...]</p> 형태)
+    html = _restore_media_markers(html, media_store)
 
     # 4) [TABLE_N] → 레이아웃 반영 이미지 태그 교체
     html = inject_table_images(html, table_images, layout)
+
+    # 5) [FIGURE_N] → 레이아웃 반영 이미지 태그 교체
+    if figure_images:
+        html = inject_figure_images(html, figure_images, fig_layout)
 
     return asyncio.run(_playwright_to_pdf(html))
 
