@@ -198,6 +198,36 @@ async def _launch_browser(p):
     return await p.chromium.launch(headless=True)
 
 
+def _protect_table_markers(text: str) -> tuple[str, dict]:
+    """[TABLE_N] 마커를 mistune 처리 전에 추출한다.
+
+    mistune은 [text] 형식을 링크 참조로 파싱할 수 있어 [TABLE_N] 마커가
+    변형될 수 있다. _extract_math()와 동일한 방식으로 마커를 고유 키로
+    치환하여 보호하고, 나중에 _restore_table_markers()로 복원한다.
+
+    각 마커는 앞뒤에 빈 줄을 추가해 독립된 문단으로 보장한다.
+    """
+    import re as _re
+    store: dict[str, str] = {}
+
+    def _save(m: re.Match) -> str:
+        n = int(m.group(1))
+        key = f"XTABLEX{n:05d}XTABLEX"
+        store[key] = f"[TABLE_{n}]"
+        # 앞뒤 빈 줄: mistune이 독립 <p>로 렌더링하도록 보장
+        return f"\n\n{key}\n\n"
+
+    protected = _re.sub(r'\[TABLE_(\d+)\]', _save, text, flags=_re.IGNORECASE)
+    return protected, store
+
+
+def _restore_table_markers(html: str, store: dict) -> str:
+    """XTABLEX 플레이스홀더를 원래 [TABLE_N] 마커로 복원한다."""
+    for key, value in store.items():
+        html = html.replace(key, value)
+    return html
+
+
 def markdown_with_tables_to_pdf_bytes(
     markdown_text: str,
     table_images: list,
@@ -205,8 +235,8 @@ def markdown_with_tables_to_pdf_bytes(
 ) -> bytes:
     """표 이미지가 포함된 마크다운 → PDF bytes.
 
-    markdown_to_html()로 HTML을 생성한 뒤 [TABLE_N] 플레이스홀더를
-    base64 인라인 이미지로 교체하고 playwright로 PDF를 렌더링한다.
+    [TABLE_N] 마커를 mistune 전에 추출(보호)하고, mistune 이후 복원한 뒤
+    실제 이미지 태그로 교체한다. 이 방식으로 mistune의 링크 파싱 간섭을 방지.
 
     Args:
         markdown_text: [TABLE_0] … 플레이스홀더가 포함된 마크다운 문자열
@@ -214,9 +244,20 @@ def markdown_with_tables_to_pdf_bytes(
         layout:        AI가 분석한 레이아웃 ("single" | "2col" | "stacked" | "mixed")
     """
     from src.table_handler import inject_table_images
-    html = markdown_to_html(markdown_text)                    # 기존 math 보호 로직 재사용
-    html = inject_table_images(html, table_images, layout)    # 레이아웃 반영 이미지 삽입
-    return asyncio.run(_playwright_to_pdf(html))              # 기존 playwright 파이프라인 재사용
+
+    # 1) [TABLE_N] 마커를 mistune 전에 XTABLEX 키로 치환 (링크 파싱 방지)
+    protected_md, table_store = _protect_table_markers(markdown_text)
+
+    # 2) mistune + math 보호 파이프라인 (XTABLEX는 평범한 텍스트로 통과)
+    html = markdown_to_html(protected_md)
+
+    # 3) XTABLEX → [TABLE_N] 복원 (이 시점에는 반드시 <p>[TABLE_N]</p> 형태)
+    html = _restore_table_markers(html, table_store)
+
+    # 4) [TABLE_N] → 레이아웃 반영 이미지 태그 교체
+    html = inject_table_images(html, table_images, layout)
+
+    return asyncio.run(_playwright_to_pdf(html))
 
 
 def open_in_browser(markdown_text: str) -> str:
