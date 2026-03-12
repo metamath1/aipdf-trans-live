@@ -118,7 +118,7 @@ class TranslationPanel(ttk.Frame):
 
     def show_table_aware_result(
         self, markdown: str, table_images: list, layout: str = "single",
-        figure_images: list | None = None,
+        figure_images: list | None = None, fig_layout: str = "single",
     ):
         """표·그림 이미지 보존 모드: 플레이스홀더 마크다운 + 캡처 이미지로 PDF 생성."""
         self._current_markdown = markdown
@@ -138,7 +138,7 @@ class TranslationPanel(ttk.Frame):
         self._open_btn.config(state=DISABLED)
         threading.Thread(
             target=self._generate_pdf_with_tables,
-            args=(markdown, table_images, layout, figure_images),
+            args=(markdown, table_images, layout, figure_images, fig_layout),
             daemon=True,
         ).start()
 
@@ -167,13 +167,13 @@ class TranslationPanel(ttk.Frame):
 
     def _generate_pdf_with_tables(
         self, markdown: str, table_images: list, layout: str = "single",
-        figure_images: list | None = None,
+        figure_images: list | None = None, fig_layout: str = "single",
     ):
         """표·그림 이미지 포함 PDF 생성 (백그라운드 스레드)."""
         try:
             from src.renderer import markdown_with_tables_to_pdf_bytes
             pdf_bytes = markdown_with_tables_to_pdf_bytes(
-                markdown, table_images, layout, figure_images
+                markdown, table_images, layout, figure_images, fig_layout
             )
             self.after(0, self._on_pdf_ready, pdf_bytes)
         except Exception as exc:

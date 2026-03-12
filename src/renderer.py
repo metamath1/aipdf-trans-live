@@ -335,6 +335,7 @@ def markdown_with_tables_to_pdf_bytes(
     table_images: list,
     layout: str = "single",
     figure_images: list | None = None,
+    fig_layout: str = "single",
 ) -> bytes:
     """표·그림 이미지가 포함된 마크다운 → PDF bytes.
 
@@ -346,6 +347,7 @@ def markdown_with_tables_to_pdf_bytes(
         table_images:   PIL.Image 리스트 (TABLE_0, TABLE_1, …에 대응)
         layout:         AI가 분석한 표 레이아웃 ("single" | "2col" | "stacked" | "mixed")
         figure_images:  PIL.Image 리스트 (FIGURE_0, FIGURE_1, …에 대응). None이면 그림 없음.
+        fig_layout:     그림 레이아웃 ("single" | "2col" | "stacked")
     """
     from src.table_handler import inject_table_images, inject_figure_images
 
@@ -361,9 +363,9 @@ def markdown_with_tables_to_pdf_bytes(
     # 4) [TABLE_N] → 레이아웃 반영 이미지 태그 교체
     html = inject_table_images(html, table_images, layout)
 
-    # 5) [FIGURE_N] → 이미지 태그 교체
+    # 5) [FIGURE_N] → 레이아웃 반영 이미지 태그 교체
     if figure_images:
-        html = inject_figure_images(html, figure_images)
+        html = inject_figure_images(html, figure_images, fig_layout)
 
     return asyncio.run(_playwright_to_pdf(html))
 

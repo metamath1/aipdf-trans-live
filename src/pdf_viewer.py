@@ -14,6 +14,27 @@ from src.translator import (
 )
 
 
+def _detect_figure_layout(fig_meta: list) -> str:
+    """그림 메타데이터(% 좌표)로 레이아웃을 추정한다.
+
+    Returns:
+        "2col"    — 첫 두 그림이 좌우 나란히 배치됨
+        "stacked" — 그림들이 위아래 배치됨
+        "single"  — 그림 1개
+    """
+    if len(fig_meta) < 2:
+        return "single"
+    f0, f1 = fig_meta[0], fig_meta[1]
+    # y 시작점이 15% 이내로 가깝고, f0이 f1보다 확실히 왼쪽에 있으면 2col
+    y_close = abs(f0.get("y_pct", 0) - f1.get("y_pct", 0)) < 15
+    x0_end  = f0.get("x_pct", 0) + f0.get("w_pct", 50)
+    x1_start = f1.get("x_pct", 50)
+    x_separated = x0_end < x1_start + 5  # f0이 f1의 왼쪽
+    if y_close and x_separated:
+        return "2col"
+    return "stacked"
+
+
 class PDFViewer(ttk.Frame):
     """Scrollable PDF viewer with drag-to-select, image capture, and translation."""
 
@@ -320,8 +341,10 @@ class PDFViewer(ttk.Frame):
                 ]
                 if len(figure_images) < len(fig_markers):
                     figure_images += [high_res] * (len(fig_markers) - len(figure_images))
+                fig_layout = _detect_figure_layout(fig_meta[:len(fig_markers)])
             else:
                 figure_images = []
+                fig_layout = "single"
 
             if has_tables or has_figures:
                 result = {
@@ -329,6 +352,7 @@ class PDFViewer(ttk.Frame):
                     "markdown":      md,
                     "table_images":  table_images,
                     "figure_images": figure_images,
+                    "fig_layout":    fig_layout,
                     "layout":        layout,
                 }
             else:

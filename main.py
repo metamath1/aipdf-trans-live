@@ -200,6 +200,7 @@ class App(ttk.Window):
                 result["table_images"],
                 result.get("layout", "single"),
                 result.get("figure_images"),
+                result.get("fig_layout", "single"),
             )
         elif self._mode_var.get() == "markdown":
             self._trans_panel.show_markdown_result(result)
