@@ -129,27 +129,57 @@ def inject_table_images(
 
     # 2-column: [TABLE_0] + [TABLE_1]을 flex 컨테이너로 묶어 좌우 배치
     if layout == "2col" and len(table_images) >= 2:
-        pair_pattern = re.compile(
-            r'<p>\s*\[TABLE_0\]\s*</p>\s*<p>\s*\[TABLE_1\]\s*</p>',
-            re.IGNORECASE,
-        )
+        b64_0 = _to_b64(table_images[0])
+        b64_1 = _to_b64(table_images[1])
         flex_html = (
             '<div style="display:flex;gap:12px;align-items:flex-start;'
             'margin:1.2em 0;">'
-            + _figure(_to_b64(table_images[0]))
-            + _figure(_to_b64(table_images[1]))
+            + _figure(b64_0)
+            + _figure(b64_1)
             + '</div>'
         )
-        html = pair_pattern.sub(flex_html, html)
+        # 케이스 A: 두 마커가 별개 <p> 문단에 존재 (정상 케이스)
+        pat_sep = re.compile(
+            r'<p[^>]*>\s*\[TABLE_0\]\s*</p>\s*<p[^>]*>\s*\[TABLE_1\]\s*</p>',
+            re.IGNORECASE,
+        )
+        # 케이스 B: AI가 같은 줄에 출력 → mistune이 하나의 <p>로 묶은 경우
+        pat_same = re.compile(
+            r'<p[^>]*>[^<]*\[TABLE_0\][^<]*\[TABLE_1\][^<]*</p>',
+            re.IGNORECASE,
+        )
+        if pat_sep.search(html):
+            html = pat_sep.sub(flex_html, html)
+        elif pat_same.search(html):
+            html = pat_same.sub(flex_html, html)
+        else:
+            # 개별 치환으로 fallback
+            html = re.sub(
+                r'<p[^>]*>[^<]*\[TABLE_0\][^<]*</p>',
+                _figure_block(b64_0), html, flags=re.IGNORECASE,
+            )
+            html = re.sub(
+                r'<p[^>]*>[^<]*\[TABLE_1\][^<]*</p>',
+                _figure_block(b64_1), html, flags=re.IGNORECASE,
+            )
         # 남은 마커(3개 이상인 경우) 순차 처리
         for i, img in enumerate(table_images[2:], start=2):
-            pat = re.compile(rf'<p>\s*\[TABLE_{i}\]\s*</p>', re.IGNORECASE)
-            html = pat.sub(_figure_block(_to_b64(img)), html)
+            html = re.sub(
+                rf'<p[^>]*>[^<]*\[TABLE_{i}\][^<]*</p>',
+                _figure_block(_to_b64(img)), html, flags=re.IGNORECASE,
+            )
         return html
 
-    # single / stacked / mixed: 순차 치환 (기존 동작)
+    # single / stacked / mixed: 순차 치환
     for i, img in enumerate(table_images):
-        pat = re.compile(rf'<p>\s*\[TABLE_{i}\]\s*</p>', re.IGNORECASE)
-        html = pat.sub(_figure_block(_to_b64(img)), html)
+        b64 = _to_b64(img)
+        # 엄격한 패턴 우선: <p> 전체가 마커인 경우
+        pat_strict = re.compile(rf'<p[^>]*>\s*\[TABLE_{i}\]\s*</p>', re.IGNORECASE)
+        # 느슨한 패턴: <p> 안에 마커가 다른 텍스트와 섞인 경우
+        pat_loose  = re.compile(rf'<p[^>]*>[^<]*\[TABLE_{i}\][^<]*</p>', re.IGNORECASE)
+        if pat_strict.search(html):
+            html = pat_strict.sub(_figure_block(b64), html)
+        elif pat_loose.search(html):
+            html = pat_loose.sub(_figure_block(b64), html)
 
     return html
