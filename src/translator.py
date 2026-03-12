@@ -211,30 +211,95 @@ LAYOUT_ANALYSIS_PROMPT = """\
   "tables": [
     {
       "id": 0,
-      "x_pct": <표 왼쪽 x좌표 / 이미지 너비 × 100, 0~100 실수>,
-      "y_pct": <표 위쪽 y좌표 / 이미지 높이 × 100, 0~100 실수>,
-      "w_pct": <표 너비 / 이미지 너비 × 100, 0~100 실수>,
-      "h_pct": <표 높이 / 이미지 높이 × 100, 0~100 실수>,
+      "x_pct": <표의 가장 왼쪽 외곽선 x좌표 ÷ 이미지 전체 너비 × 100. 캡션/제목 포함. 소수점 1자리>,
+      "y_pct": <표의 가장 위쪽 외곽선(캡션 포함) y좌표 ÷ 이미지 전체 높이 × 100. 소수점 1자리>,
+      "w_pct": <표 전체 너비(오른쪽 외곽선까지) ÷ 이미지 너비 × 100. 소수점 1자리>,
+      "h_pct": <표 전체 높이(마지막 행까지) ÷ 이미지 높이 × 100. 소수점 1자리>,
       "caption_ko": "<표 제목을 한국어로 번역>"
     }
   ],
-  "markdown": "<나머지 텍스트를 한국어로 번역. 표 위치에는 [TABLE_0], [TABLE_1] 등 순서대로 삽입. 중요: 각 [TABLE_N] 플레이스홀더는 반드시 앞뒤를 빈 줄로 분리하여 단독 문단으로 배치 (예: 이전 텍스트\\n\\n[TABLE_0]\\n\\n다음 텍스트). 수식은 $...$, $$...$$ 원본 LaTeX 그대로 유지. Markdown 형식으로 출력>"
+  "markdown": "<나머지 텍스트를 한국어로 번역. 각 표 위치에 [TABLE_0], [TABLE_1] 등을 단독 문단으로 삽입 (앞뒤 빈 줄). 수식은 $...$, $$...$$ 원본 LaTeX 유지. Markdown 형식>"
 }
 
-layout 값 선택 기준:
-- single  : 표가 1개
-- 2col    : 표 2개가 좌우 나란히 배치 (2단 편집 레이아웃)
-- stacked : 표가 2개 이상이며 위아래로 배치
-- mixed   : 표가 3개 이상이거나 복잡한 배치
+좌표 측정 기준:
+- 이미지 좌상단이 (0, 0), 우하단이 (100, 100)
+- x_pct + w_pct ≤ 100, y_pct + h_pct ≤ 100 이어야 함
+- 표 캡션(Table 1: ...)이 있으면 반드시 y_pct에 포함 (캡션 위쪽 라인부터 시작)
+- 표 외곽선(border)의 바깥쪽을 기준으로 측정 (안쪽 셀 기준 아님)
+- 좌우 여백(margin)은 포함하지 않음 (표 자체 영역만)
+- 2col 레이아웃: 두 표가 좌우 나란히 있을 때 각 표를 개별 bounding box로 측정
+
+layout 값:
+- single  : 표 1개
+- 2col    : 표 2개가 좌우 나란히 (2단 편집)
+- stacked : 표 2개+ 위아래 배치
+- mixed   : 3개+ 또는 복잡한 배치
 
 표가 없으면 has_tables=false, tables=[], layout="single", markdown에 전체 번역 결과 출력.
 """
+
+
+def get_layout_model_backend() -> tuple[str, str]:
+    """레이아웃 분석용 백엔드와 모델을 반환.
+
+    LAYOUT_MODEL 환경변수가 설정된 경우 해당 모델 사용.
+    미설정 시 기본 번역 모델 그대로 사용.
+
+    Returns:
+        (backend, model_name) 튜플  — backend: "claude" | "gemini"
+    """
+    layout_model = os.environ.get("LAYOUT_MODEL", "").strip()
+    if not layout_model:
+        backend = get_backend()
+        if backend == "gemini":
+            return "gemini", os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+        else:
+            return "claude", os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+    # 모델명으로 백엔드 자동 판별
+    if "gemini" in layout_model.lower():
+        return "gemini", layout_model
+    else:
+        return "claude", layout_model
+
+
+def _gemini_vision_with_model(image: Image.Image, prompt: str, model: str) -> str:
+    client = _get_gemini_client()
+    response = client.models.generate_content(model=model, contents=[prompt, image])
+    return response.text
+
+
+def _claude_vision_with_model(
+    image: Image.Image, prompt: str, model: str, max_tokens: int = 2048
+) -> str:
+    client = _get_claude_client()
+    b64_data = _pil_to_base64_png(image)
+    message = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": b64_data,
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    )
+    return message.content[0].text
 
 
 def analyze_and_translate(image: Image.Image) -> dict:
     """레이아웃 분석 + 번역을 1회 API 호출로 수행.
 
     AI가 이미지의 표 레이아웃(위치·배치)을 분석하고 번역까지 한번에 반환한다.
+    LAYOUT_MODEL 환경변수로 번역 모델과 다른 강력한 모델을 지정할 수 있다.
 
     Returns:
         {
@@ -245,19 +310,19 @@ def analyze_and_translate(image: Image.Image) -> dict:
         }
         JSON 파싱 실패 시 has_tables=False, markdown=raw 응답 텍스트
     """
-    backend = get_backend()
+    backend, model = get_layout_model_backend()
     try:
         raw = (
-            _gemini_vision(image, LAYOUT_ANALYSIS_PROMPT)
+            _gemini_vision_with_model(image, LAYOUT_ANALYSIS_PROMPT, model)
             if backend == "gemini"
-            else _claude_vision(image, LAYOUT_ANALYSIS_PROMPT, max_tokens=4096)
+            else _claude_vision_with_model(image, LAYOUT_ANALYSIS_PROMPT, model, max_tokens=4096)
         )
     except Exception as exc:
         return {
             "has_tables": False,
             "layout": "single",
             "tables": [],
-            "markdown": f"[번역 오류 – {backend}] {exc}",
+            "markdown": f"[번역 오류 – {backend}/{model}] {exc}",
         }
 
     data = _parse_layout_json(raw)
