@@ -36,6 +36,18 @@ MARKDOWN_PROMPT = (
     "6. Markdown만 출력, 다른 설명 없음"
 )
 
+# 표가 감지된 경우 사용: 표는 플레이스홀더로 남기고 나머지 텍스트만 번역
+TABLE_AWARE_PROMPT = (
+    "이 이미지의 학술 논문 내용을 분석하세요. 아래 규칙을 따르세요:\n"
+    "1. 영어 텍스트는 자연스러운 한국어로 번역\n"
+    "2. 수학 수식은 LaTeX 형식 그대로 보존 (인라인: $수식$, 블록: $$수식$$)\n"
+    "3. 표(table)는 번역하지 말고 해당 위치에 [TABLE_0], [TABLE_1] 등의 "
+    "플레이스홀더만 순서대로 삽입 (표가 1개면 [TABLE_0]만, 2개면 [TABLE_0]과 [TABLE_1])\n"
+    "4. 표 제목(캡션)이나 표 주변 텍스트는 한국어로 번역\n"
+    "5. 제목은 # ## 마크다운 헤딩으로 유지\n"
+    "6. Markdown만 출력, 다른 설명 없음"
+)
+
 
 def get_backend() -> Backend:
     return os.environ.get("TRANSLATOR_BACKEND", "claude").lower().strip()  # type: ignore[return-value]
@@ -139,6 +151,27 @@ def translate_to_markdown(image: Image.Image) -> str:
             return _gemini_vision(image, MARKDOWN_PROMPT)
         else:
             return _claude_vision(image, MARKDOWN_PROMPT, max_tokens=4096)
+    except Exception as exc:
+        return f"[번역 오류 – {backend}] {exc}"
+
+
+def translate_to_markdown_table_aware(image: Image.Image, table_count: int) -> str:
+    """표 위치에 [TABLE_N] 플레이스홀더를 삽입하는 마크다운 번역.
+
+    표가 감지된 경우 사용. AI는 표 내용은 번역하지 않고 플레이스홀더만 남기며,
+    표 캡션·제목 등 나머지 텍스트는 한국어 마크다운으로 번역한다.
+
+    Args:
+        image:       드래그 선택 영역 PIL 이미지
+        table_count: 감지된 표 개수 (프롬프트 힌트용)
+    """
+    backend = get_backend()
+    prompt = TABLE_AWARE_PROMPT
+    try:
+        if backend == "gemini":
+            return _gemini_vision(image, prompt)
+        else:
+            return _claude_vision(image, prompt, max_tokens=4096)
     except Exception as exc:
         return f"[번역 오류 – {backend}] {exc}"
 

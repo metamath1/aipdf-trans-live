@@ -8,7 +8,11 @@ from PIL import Image, ImageTk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
-from src.translator import translate_region, translate_to_markdown
+from src.translator import (
+    translate_region,
+    translate_to_markdown,
+    translate_to_markdown_table_aware,
+)
 
 
 class PDFViewer(ttk.Frame):
@@ -253,9 +257,30 @@ class PDFViewer(ttk.Frame):
         ))
 
         if self._translation_mode == "markdown":
-            result = translate_to_markdown(cropped)
+            # 표 감지: canvas 좌표 → PDF 포인트 좌표로 변환
+            pdf_rect = fitz.Rect(
+                rx0 / self.zoom, ry0 / self.zoom,
+                rx1 / self.zoom, ry1 / self.zoom,
+            )
+            page = self.doc[self.current_page]
+
+            from src.table_handler import detect_tables, render_table_image
+            table_rects = detect_tables(page, pdf_rect)
+
+            if table_rects:
+                # 각 표를 원본 PDF에서 고해상도 이미지로 추출
+                table_images = [render_table_image(page, r) for r in table_rects]
+                md = translate_to_markdown_table_aware(cropped, len(table_images))
+                result = {
+                    "type": "table_aware",
+                    "markdown": md,
+                    "table_images": table_images,
+                }
+            else:
+                result = translate_to_markdown(cropped)
         else:
             result = translate_region(cropped)
+
         self._translation_result = (cropped, result)
         self.event_generate("<<TranslationReady>>")
 

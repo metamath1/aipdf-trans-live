@@ -193,6 +193,11 @@ class App(ttk.Window):
         _img, result = self._viewer.last_translation
         if _img is None:
             self._trans_panel.show_error(result)
+        elif isinstance(result, dict) and result.get("type") == "table_aware":
+            # 표가 감지된 경우: 원본 표 이미지 + 번역된 텍스트
+            self._trans_panel.show_table_aware_result(
+                result["markdown"], result["table_images"]
+            )
         elif self._mode_var.get() == "markdown":
             self._trans_panel.show_markdown_result(result)
         else:

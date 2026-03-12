@@ -198,6 +198,24 @@ async def _launch_browser(p):
     return await p.chromium.launch(headless=True)
 
 
+def markdown_with_tables_to_pdf_bytes(
+    markdown_text: str, table_images: list
+) -> bytes:
+    """표 이미지가 포함된 마크다운 → PDF bytes.
+
+    markdown_to_html()로 HTML을 생성한 뒤 [TABLE_N] 플레이스홀더를
+    base64 인라인 이미지로 교체하고 playwright로 PDF를 렌더링한다.
+
+    Args:
+        markdown_text: [TABLE_0] … 플레이스홀더가 포함된 마크다운 문자열
+        table_images:  PIL.Image 리스트 (순서대로 TABLE_0, TABLE_1, …에 대응)
+    """
+    from src.table_handler import inject_table_images
+    html = markdown_to_html(markdown_text)        # 기존 math 보호 로직 재사용
+    html = inject_table_images(html, table_images)  # 플레이스홀더 → 이미지 태그
+    return asyncio.run(_playwright_to_pdf(html))   # 기존 playwright 파이프라인 재사용
+
+
 def open_in_browser(markdown_text: str) -> str:
     """Save Markdown as HTML to a temp file and open in default browser.
 
