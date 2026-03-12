@@ -120,7 +120,8 @@ def _extract_math(text: str) -> tuple[str, dict]:
     # Inline math: \(...\) and $...$ forms
     text = re.sub(r'\\\([\s\S]*?\\\)', save_inln, text)
     # Inline $...$: NOT followed by digit/space/newline (avoids $10, $ price etc.)
-    text = re.sub(r'\$(?=[^\$\s\d\n])([^\$\n]*?)\$', save_inln, text)
+    # (?:[^\$\n]|\n(?!\n))*? — 단일 개행은 허용하되, 빈 줄(문단 경계 \n\n)에서는 중단
+    text = re.sub(r'\$(?=[^\$\s\d\n])((?:[^\$\n]|\n(?!\n))*?)\$', save_inln, text)
 
     return text, store
 
