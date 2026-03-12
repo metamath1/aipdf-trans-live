@@ -273,45 +273,66 @@ class PDFViewer(ttk.Frame):
             layout_info = analyze_and_translate(high_res)
             md       = layout_info["markdown"]
             layout   = layout_info["layout"]
-            tbl_meta = layout_info["tables"]   # [{id, x_pct, y_pct, w_pct, h_pct}, ...]
+            tbl_meta = layout_info["tables"]    # [{id, x_pct, y_pct, w_pct, h_pct}, ...]
+            fig_meta = layout_info.get("figures", [])  # [{id, x_pct, y_pct, w_pct, h_pct}, ...]
 
             import re as _re
-            markers = _re.findall(r'\[TABLE_\d+\]', md, _re.IGNORECASE)
+            tbl_markers = _re.findall(r'\[TABLE_\d+\]', md, _re.IGNORECASE)
+            fig_markers = _re.findall(r'\[FIGURE_\d+\]', md, _re.IGNORECASE)
 
-            if markers and layout_info["has_tables"]:
+            has_tables  = bool(tbl_markers and layout_info["has_tables"])
+            has_figures = bool(fig_markers and layout_info.get("has_figures", False))
+
+            if has_tables:
                 # [1순위] PyMuPDF 정밀 크롭
                 table_rects = detect_tables(page, pdf_rect)
-                if table_rects and len(table_rects) >= len(markers):
+                if table_rects and len(table_rects) >= len(tbl_markers):
                     table_images = [
                         render_table_image(page, r)
-                        for r in table_rects[:len(markers)]
+                        for r in table_rects[:len(tbl_markers)]
                     ]
-
                 elif tbl_meta:
-                    # [2순위] AI % 좌표로 개별 크롭 (분석에 사용한 high_res 그대로 사용)
+                    # [2순위] AI % 좌표로 개별 크롭
                     table_images = [
                         crop_table_pct(
                             high_res,
                             t["x_pct"], t["y_pct"],
                             t["w_pct"], t["h_pct"],
                         )
-                        for t in tbl_meta[:len(markers)]
+                        for t in tbl_meta[:len(tbl_markers)]
                     ]
-                    if len(table_images) < len(markers):
-                        table_images += [high_res] * (len(markers) - len(table_images))
-
+                    if len(table_images) < len(tbl_markers):
+                        table_images += [high_res] * (len(tbl_markers) - len(table_images))
                 else:
-                    # [최후 fallback] 전체 선택 이미지
-                    table_images = [high_res] * len(markers)
+                    table_images = [high_res] * len(tbl_markers)
+            else:
+                table_images = []
 
+            if has_figures and fig_meta:
+                # 그림은 PyMuPDF로 자동 감지 불가 → AI % 좌표로 크롭
+                figure_images = [
+                    crop_table_pct(
+                        high_res,
+                        f["x_pct"], f["y_pct"],
+                        f["w_pct"], f["h_pct"],
+                    )
+                    for f in fig_meta[:len(fig_markers)]
+                ]
+                if len(figure_images) < len(fig_markers):
+                    figure_images += [high_res] * (len(fig_markers) - len(figure_images))
+            else:
+                figure_images = []
+
+            if has_tables or has_figures:
                 result = {
-                    "type":         "table_aware",
-                    "markdown":     md,
-                    "table_images": table_images,
-                    "layout":       layout,
+                    "type":          "table_aware",
+                    "markdown":      md,
+                    "table_images":  table_images,
+                    "figure_images": figure_images,
+                    "layout":        layout,
                 }
             else:
-                # AI가 표 없다고 판단 → 일반 마크다운으로 처리
+                # AI가 표·그림 없다고 판단 → 일반 마크다운으로 처리
                 result = md
         else:
             result = translate_region(cropped)

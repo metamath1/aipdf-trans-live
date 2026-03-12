@@ -188,3 +188,48 @@ def inject_table_images(
             html = pat_loose.sub(_figure_block(b64), html)
 
     return html
+
+
+# ---------------------------------------------------------------------------
+# HTML 내 [FIGURE_N] 플레이스홀더 → <figure><img> 교체
+# ---------------------------------------------------------------------------
+
+def inject_figure_images(
+    html: str,
+    figure_images: list[Image.Image],
+) -> str:
+    """HTML 내 ``<p>[FIGURE_N]</p>`` 패턴을 이미지 태그로 교체한다.
+
+    그림은 항상 단일 열(full-width) 중앙 정렬로 삽입한다.
+
+    Args:
+        html:          mistune 변환 후의 HTML 문자열
+        figure_images: PIL.Image 리스트 (순서대로 FIGURE_0, FIGURE_1, …에 대응)
+
+    Returns:
+        그림 이미지가 삽입된 HTML 문자열
+    """
+    def _to_b64(img: Image.Image) -> str:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    def _figure_block(b64: str) -> str:
+        return (
+            f'<figure style="margin:1.2em 0;text-align:center;">'
+            f'<img src="data:image/png;base64,{b64}" '
+            f'style="max-width:100%;border:1px solid #d0d0d0;'
+            f'border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,.12);">'
+            f'</figure>'
+        )
+
+    for i, img in enumerate(figure_images):
+        b64 = _to_b64(img)
+        pat_strict = re.compile(rf'<p[^>]*>\s*\[FIGURE_{i}\]\s*</p>', re.IGNORECASE)
+        pat_loose  = re.compile(rf'<p[^>]*>[^<]*\[FIGURE_{i}\][^<]*</p>', re.IGNORECASE)
+        if pat_strict.search(html):
+            html = pat_strict.sub(_figure_block(b64), html)
+        elif pat_loose.search(html):
+            html = pat_loose.sub(_figure_block(b64), html)
+
+    return html
