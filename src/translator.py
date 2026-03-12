@@ -181,6 +181,103 @@ def translate_to_markdown_table_aware(
         return f"[번역 오류 – {backend}] {exc}"
 
 
+def _parse_layout_json(text: str) -> dict | None:
+    """AI 응답 텍스트에서 JSON 파싱. 코드 펜스 제거 후 시도, 실패 시 None."""
+    import json
+    import re as _re
+    # 코드 펜스 제거 (```json ... ``` 또는 ``` ... ```)
+    text = _re.sub(r'```(?:json)?\s*', '', text).strip()
+    text = _re.sub(r'```\s*$', '', text, flags=_re.MULTILINE).strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        # JSON 블록이 텍스트 중간에 있는 경우 추출 시도
+        m = _re.search(r'\{[\s\S]+\}', text)
+        if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+    return None
+
+
+# 레이아웃 분석 + 번역을 동시에 요청하는 통합 프롬프트
+LAYOUT_ANALYSIS_PROMPT = """\
+이 이미지를 분석하여 아래 JSON 형식으로만 응답하세요. JSON 외에 아무것도 출력하지 마세요.
+
+{
+  "has_tables": <true 또는 false>,
+  "layout": "<single | 2col | stacked | mixed>",
+  "tables": [
+    {
+      "id": 0,
+      "x_pct": <표 왼쪽 x좌표 / 이미지 너비 × 100, 0~100 실수>,
+      "y_pct": <표 위쪽 y좌표 / 이미지 높이 × 100, 0~100 실수>,
+      "w_pct": <표 너비 / 이미지 너비 × 100, 0~100 실수>,
+      "h_pct": <표 높이 / 이미지 높이 × 100, 0~100 실수>,
+      "caption_ko": "<표 제목을 한국어로 번역>"
+    }
+  ],
+  "markdown": "<나머지 텍스트를 한국어로 번역. 표 위치에는 [TABLE_0], [TABLE_1] 등 순서대로 삽입. 수식은 $...$, $$...$$ 원본 LaTeX 그대로 유지. Markdown 형식으로 출력>"
+}
+
+layout 값 선택 기준:
+- single  : 표가 1개
+- 2col    : 표 2개가 좌우 나란히 배치 (2단 편집 레이아웃)
+- stacked : 표가 2개 이상이며 위아래로 배치
+- mixed   : 표가 3개 이상이거나 복잡한 배치
+
+표가 없으면 has_tables=false, tables=[], layout="single", markdown에 전체 번역 결과 출력.
+"""
+
+
+def analyze_and_translate(image: Image.Image) -> dict:
+    """레이아웃 분석 + 번역을 1회 API 호출로 수행.
+
+    AI가 이미지의 표 레이아웃(위치·배치)을 분석하고 번역까지 한번에 반환한다.
+
+    Returns:
+        {
+          "has_tables": bool,
+          "layout": str,      # "single" | "2col" | "stacked" | "mixed"
+          "tables": list,     # [{id, x_pct, y_pct, w_pct, h_pct, caption_ko}, ...]
+          "markdown": str,    # [TABLE_N] 마커 포함 번역 마크다운
+        }
+        JSON 파싱 실패 시 has_tables=False, markdown=raw 응답 텍스트
+    """
+    backend = get_backend()
+    try:
+        raw = (
+            _gemini_vision(image, LAYOUT_ANALYSIS_PROMPT)
+            if backend == "gemini"
+            else _claude_vision(image, LAYOUT_ANALYSIS_PROMPT, max_tokens=4096)
+        )
+    except Exception as exc:
+        return {
+            "has_tables": False,
+            "layout": "single",
+            "tables": [],
+            "markdown": f"[번역 오류 – {backend}] {exc}",
+        }
+
+    data = _parse_layout_json(raw)
+    if data and "markdown" in data:
+        return {
+            "has_tables": bool(data.get("has_tables", False)),
+            "layout":     data.get("layout", "single"),
+            "tables":     data.get("tables", []),
+            "markdown":   data["markdown"],
+        }
+
+    # JSON 파싱 실패 → raw 텍스트 자체를 마크다운으로 fallback
+    return {
+        "has_tables": False,
+        "layout": "single",
+        "tables": [],
+        "markdown": raw,
+    }
+
+
 def reset_clients() -> None:
     """Force re-initialisation of API clients (e.g. after env change)."""
     global _claude_client, _gemini_client

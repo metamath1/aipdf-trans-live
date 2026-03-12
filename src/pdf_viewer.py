@@ -11,7 +11,6 @@ from ttkbootstrap.constants import *
 from src.translator import (
     translate_region,
     translate_to_markdown,
-    translate_to_markdown_table_aware,
 )
 
 
@@ -257,49 +256,63 @@ class PDFViewer(ttk.Frame):
         ))
 
         if self._translation_mode == "markdown":
-            # AI가 표 유무를 판단 (TABLE_AWARE_PROMPT: 표 위치에 [TABLE_N] 마커 삽입)
-            # PyMuPDF find_tables()보다 AI Vision이 복잡한 학술 표 감지에 더 신뢰성 높음
-            md = translate_to_markdown_table_aware(cropped, max_tables=5)
+            from src.table_handler import detect_tables, render_table_image, crop_table_pct
+            from src.translator import analyze_and_translate
+
+            # 1) AI: 레이아웃 분석 + 번역 (1회 호출)
+            #    - 표 위치(%), 레이아웃 타입, 번역 마크다운을 JSON으로 반환
+            layout_info = analyze_and_translate(cropped)
+            md       = layout_info["markdown"]
+            layout   = layout_info["layout"]
+            tbl_meta = layout_info["tables"]   # [{id, x_pct, y_pct, w_pct, h_pct}, ...]
 
             import re as _re
             markers = _re.findall(r'\[TABLE_\d+\]', md, _re.IGNORECASE)
 
-            if markers:
-                # AI가 표를 감지함 → 원본 PDF에서 표 이미지 추출
+            if markers and layout_info["has_tables"]:
                 pdf_rect = fitz.Rect(
                     rx0 / self.zoom, ry0 / self.zoom,
                     rx1 / self.zoom, ry1 / self.zoom,
                 )
                 page = self.doc[self.current_page]
 
-                from src.table_handler import detect_tables, render_table_image
+                # 2) [1순위] PyMuPDF 정밀 크롭
                 table_rects = detect_tables(page, pdf_rect)
-
                 if table_rects and len(table_rects) >= len(markers):
-                    # PyMuPDF가 정확한 표 영역을 찾은 경우 – 정밀 크롭
                     table_images = [
                         render_table_image(page, r)
-                        for r in table_rects[: len(markers)]
+                        for r in table_rects[:len(markers)]
                     ]
+
+                elif tbl_meta:
+                    # 3) [2순위] AI 제공 % 좌표로 개별 크롭
+                    #    전체 선택 영역을 고해상도로 렌더링 후 퍼센트 좌표로 크롭
+                    high_res = render_table_image(page, pdf_rect, dpi=150)
+                    table_images = [
+                        crop_table_pct(
+                            high_res,
+                            t["x_pct"], t["y_pct"],
+                            t["w_pct"], t["h_pct"],
+                        )
+                        for t in tbl_meta[:len(markers)]
+                    ]
+                    # AI 제공 표 수 < 마커 수인 경우 high_res로 보완
+                    if len(table_images) < len(markers):
+                        table_images += [high_res] * (len(markers) - len(table_images))
+
                 else:
-                    # PyMuPDF 감지 실패 또는 수 불일치
-                    # → 전체 선택 영역을 고해상도로 렌더링해 모든 마커에 공유
-                    full_img = render_table_image(page, pdf_rect)
-                    if table_rects:
-                        # 일부는 정밀 크롭, 나머지는 전체 이미지로 보완
-                        table_images = [render_table_image(page, r) for r in table_rects]
-                        table_images += [full_img] * (len(markers) - len(table_rects))
-                    else:
-                        table_images = [full_img] * len(markers)
+                    # 4) [최후 fallback] 전체 선택 이미지 공유
+                    full_img = render_table_image(page, pdf_rect, dpi=150)
+                    table_images = [full_img] * len(markers)
 
                 result = {
-                    "type": "table_aware",
-                    "markdown": md,
+                    "type":         "table_aware",
+                    "markdown":     md,
                     "table_images": table_images,
+                    "layout":       layout,
                 }
             else:
                 # AI가 표 없다고 판단 → 일반 마크다운으로 처리
-                # (TABLE_AWARE_PROMPT도 표 없으면 MARKDOWN_PROMPT와 동일한 출력)
                 result = md
         else:
             result = translate_region(cropped)
