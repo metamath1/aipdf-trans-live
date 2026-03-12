@@ -92,6 +92,73 @@ MathJax = {
 </html>"""
 
 
+def _scan_inline_dollar_math(text: str, store: dict, counter: list) -> str:
+    """문자 단위 스캔으로 $…$ 인라인 수식을 추출·플레이스홀더로 치환한다.
+
+    regex 방식의 엣지 케이스(유니코드 공백, Windows 개행, 특수 선행문자 등)를
+    완전히 우회한다. 비탐욕(non-greedy): 항상 가장 가까운 닫는 $를 선택.
+
+    규칙:
+    - $$ 는 건너뜀 (display math는 이미 처리됨)
+    - $ 뒤 첫 문자가 공백(Unicode 포함) 또는 십진수이면 수식 아님 ($10, $ price)
+    - 빈 줄(\\n\\n)을 만나면 닫는 $ 탐색 중단
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        ch = text[i]
+
+        if ch != '$':
+            out.append(ch)
+            i += 1
+            continue
+
+        # '$' 발견
+        # Guard 1: '$$' 는 건너뜀 (display math placeholder 뒤 남은 $ 포함)
+        if i + 1 < n and text[i + 1] == '$':
+            out.append(ch)
+            i += 1
+            continue
+
+        # Guard 2: $ 바로 다음이 공백(Unicode 포함) 또는 십진수이면 수식 아님
+        if i + 1 >= n or text[i + 1].isspace() or text[i + 1].isdecimal():
+            out.append(ch)
+            i += 1
+            continue
+
+        # 닫는 '$' 탐색 (빈 줄에서 중단)
+        j = i + 1
+        found_close = -1
+        while j < n:
+            c = text[j]
+            if c == '$':
+                if j + 1 < n and text[j + 1] == '$':
+                    j += 2          # $$ 는 닫는 기호로 인정하지 않음
+                    continue
+                found_close = j
+                break
+            if c == '\n' and j + 1 < n and text[j + 1] == '\n':
+                break               # 빈 줄 = 문단 경계 → 중단
+            j += 1
+
+        if found_close == -1:
+            out.append(ch)
+            i += 1
+            continue
+
+        # 수식 추출 ($ 구분자 포함)
+        formula = text[i:found_close + 1]
+        key = f"XAMATHINLNX{counter[0]:05d}XAMATHINLNX"
+        store[key] = formula
+        counter[0] += 1
+        out.append(key)
+        i = found_close + 1
+
+    return ''.join(out)
+
+
 def _extract_math(text: str) -> tuple[str, dict]:
     """Replace math expressions with safe ASCII placeholders before mistune.
 
@@ -117,11 +184,10 @@ def _extract_math(text: str) -> tuple[str, dict]:
     # Display math first (may span multiple lines)
     text = re.sub(r'\$\$[\s\S]*?\$\$', save_disp, text)
     text = re.sub(r'\\\[[\s\S]*?\\\]', save_disp, text)
-    # Inline math: \(...\) and $...$ forms
+    # Inline math: \(...\) form
     text = re.sub(r'\\\([\s\S]*?\\\)', save_inln, text)
-    # Inline $...$: NOT followed by digit/space/newline (avoids $10, $ price etc.)
-    # (?:[^\$\n]|\n(?!\n))*? — 단일 개행은 허용하되, 빈 줄(문단 경계 \n\n)에서는 중단
-    text = re.sub(r'\$(?=[^\$\s\d\n])((?:[^\$\n]|\n(?!\n))*?)\$', save_inln, text)
+    # Inline $...$: 문자 스캔 방식 — regex 엣지 케이스 완전 우회
+    text = _scan_inline_dollar_math(text, store, counter)
 
     return text, store
 
@@ -132,9 +198,14 @@ def _restore_math(html: str, store: dict) -> str:
     The original delimiters ($...$, $$...$$, \\(...\\), \\[...\\]) are preserved
     exactly so MathJax can process them without any conversion errors.
     MathJax is configured to handle all four delimiter forms.
+
+    '<' is HTML-escaped to '&lt;' to prevent the HTML parser from interpreting
+    LaTeX operators (e.g. $a < b$) as tag openers. MathJax reads DOM text nodes
+    where the entity has already been decoded back to '<', so rendering is correct.
     """
     for key, value in store.items():
-        html = html.replace(key, value)
+        safe = value.replace('<', '&lt;')
+        html = html.replace(key, safe)
     return html
 
 
